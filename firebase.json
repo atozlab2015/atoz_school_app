@@ -1,0 +1,39 @@
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "atozlab-lesson-reservation-app",
+          "appId": "1:91161692539:android:e04b22ddfcacfc815a95de",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "atozlab-lesson-reservation-app",
+          "configurations": {
+            "android": "1:91161692539:android:e04b22ddfcacfc815a95de",
+            "ios": "1:91161692539:ios:c26b9ecd847c51b15a95de",
+            "macos": "1:91161692539:ios:c26b9ecd847c51b15a95de",
+            "web": "1:91161692539:web:166665ccb757995b5a95de",
+            "windows": "1:91161692539:web:81f79523734b84145a95de"
+          }
+        }
+      }
+    }
+  },
+  "hosting": {
+    "public": "build/web",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  }
+}

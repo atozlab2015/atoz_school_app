@@ -1,0 +1,61 @@
+import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+// ▼ 必要な画面へのインポート (Adminメニューで使う画面)
+import 'subject_list_screen.dart';
+import 'calendar_generation_screen.dart';
+
+// AdminDashboardScreen: 管理者が操作するホーム画面です
+class AdminDashboardScreen extends StatelessWidget {
+  const AdminDashboardScreen({super.key});
+  
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('管理者ダッシュボード'),
+        backgroundColor: Colors.indigo,
+        actions: [
+          IconButton(icon: const Icon(Icons.logout), onPressed: () => FirebaseAuth.instance.signOut()),
+        ],
+      ),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text('管理者メニューへようこそ。', style: TextStyle(fontSize: 18)),
+            const SizedBox(height: 40),
+            
+            // 1. マスタ管理
+            ElevatedButton.icon(
+              icon: const Icon(Icons.category),
+              label: const Text('1. クラス・マスタ設定', style: TextStyle(fontSize: 18)),
+              onPressed: () {
+                Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SubjectListScreen())); 
+              },
+            ),
+            const SizedBox(height: 20),
+            
+            // 2. カレンダー生成
+            ElevatedButton.icon(
+              icon: const Icon(Icons.calendar_month),
+              label: const Text('2. 年間カレンダー生成', style: TextStyle(fontSize: 18)),
+              onPressed: () {
+                Navigator.of(context).push(MaterialPageRoute(builder: (_) => const CalendarGenerationScreen()));
+              },
+            ),
+            const SizedBox(height: 20),
+            
+            // 3. 振替承認 
+            ElevatedButton.icon(
+              icon: const Icon(Icons.check_circle_outline),
+              label: const Text('3. 振替予約の承認', style: TextStyle(fontSize: 18)),
+              onPressed: () {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('承認機能は開発中です')));
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

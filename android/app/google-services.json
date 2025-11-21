@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "91161692539",
+    "project_id": "atozlab-lesson-reservation-app",
+    "storage_bucket": "atozlab-lesson-reservation-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:91161692539:android:e04b22ddfcacfc815a95de",
+        "android_client_info": {
+          "package_name": "com.example.atoz_school_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDQEmqO71f2VVj00SHTGqS7lMRTgWZYGJk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:91161692539:android:a18123fdd9b1544e5a95de",
+        "android_client_info": {
+          "package_name": "com.example.flutter_application_test"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDQEmqO71f2VVj00SHTGqS7lMRTgWZYGJk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

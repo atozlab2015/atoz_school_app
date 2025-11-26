@@ -3,10 +3,15 @@ import 'package:table_calendar/table_calendar.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
+
 import 'package:atoz_school_app/models/lesson_model.dart';
 import 'package:atoz_school_app/models/student_model.dart';
-import 'reservation_confirm_screen.dart';
+import 'package:atoz_school_app/models/ticket_model.dart';
 import 'student_link_screen.dart';
+import 'ticket_list_screen.dart';
+import 'reservation_confirm_screen.dart';
+import 'transfer_lesson_selector_screen.dart';
+import 'transfer_history_screen.dart';
 
 class GuardianHomeScreen extends StatefulWidget {
   const GuardianHomeScreen({super.key});
@@ -20,232 +25,279 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
   DateTime _focusedDay = DateTime.now();
   DateTime? _selectedDay;
   
-  Map<String, List<_CalendarItem>> _calendarItemsByDay = {}; 
   List<Student> _myChildren = [];
-  bool _isLoading = true;
+  bool _isLoadingChildren = true;
 
-  // ★追加: マスタデータ（名前引き用）
-  Map<String, String> _courseNames = {}; // courseId -> Name
-  Map<String, String> _levelNames = {};  // levelId -> Name
-  Map<String, String> _levelToCourse = {}; // levelId -> courseId
+  Map<String, String> _courseNames = {}; 
+  Map<String, String> _levelNames = {};  
+  Map<String, String> _levelToCourse = {}; 
+  Map<String, String> _groupToLevel = {}; 
 
   @override
   void initState() {
     super.initState();
     _selectedDay = _focusedDay;
-    _fetchMasterData(); // ★マスタデータを先に読み込む
-    _fetchMyChildrenAndLessons();
+    _fetchMasterData(); 
+    _fetchMyChildren();
   }
 
-  // ★追加: コースとレベルの名前を取得する
   Future<void> _fetchMasterData() async {
     try {
       final firestore = FirebaseFirestore.instance;
-      
-      // コース名取得
       final coursesSnap = await firestore.collection('courses').get();
       for (var doc in coursesSnap.docs) {
         _courseNames[doc.id] = doc.data()['name'] ?? '';
       }
-
-      // レベル名取得
       final levelsSnap = await firestore.collection('levels').get();
       for (var doc in levelsSnap.docs) {
         final data = doc.data();
         _levelNames[doc.id] = data['name'] ?? '';
         _levelToCourse[doc.id] = data['courseId'] ?? '';
       }
-      
-      // 画面更新（再描画して名前を反映）
+      final groupsSnap = await firestore.collection('groups').get();
+      for (var doc in groupsSnap.docs) {
+        final data = doc.data();
+        _groupToLevel[doc.id] = data['levelId'] ?? '';
+      }
       if (mounted) setState(() {});
-      
     } catch (e) {
       print('Error fetching master data: $e');
     }
   }
 
-  // ヘルパー関数: レベルIDからコース名・レベル名を取得
   String _getCourseAndLevelName(String levelId) {
     final levelName = _levelNames[levelId] ?? '';
     final courseId = _levelToCourse[levelId];
     final courseName = courseId != null ? _courseNames[courseId] ?? '' : '';
-    
     if (courseName.isEmpty && levelName.isEmpty) return '';
     return '$courseName $levelName';
   }
 
-  Future<void> _fetchMyChildrenAndLessons() async {
+  Future<void> _fetchMyChildren() async {
     final uid = FirebaseAuth.instance.currentUser!.uid;
-    
     final snapshot = await FirebaseFirestore.instance
         .collection('students')
         .where('parentId', isEqualTo: uid)
         .get();
-
-    final children = snapshot.docs
-        .map((doc) => Student.fromMap(doc.data(), doc.id))
-        .toList();
-
+    
     if (mounted) {
       setState(() {
-        _myChildren = children;
-        _isLoading = false;
+        _myChildren = snapshot.docs.map((doc) => Student.fromMap(doc.data(), doc.id)).toList();
+        _isLoadingChildren = false;
       });
-      if (children.isNotEmpty) {
-        _startListeningToLessons();
-      }
     }
   }
-
-  void _startListeningToLessons() {
-    FirebaseFirestore.instance
-        .collection('lessonInstances')
-        .where('isCancelled', isEqualTo: false)
-        .snapshots()
-        .listen((lessonSnapshot) async {
-      
-      final reservationSnapshot = await FirebaseFirestore.instance
-          .collection('reservations')
-          .where('studentId', whereIn: _myChildren.map((s) => s.id).toList())
-          .where('status', whereIn: ['pending', 'approved'])
-          .get();
-
-      final Map<String, String> reservationMap = {};
-      for (var doc in reservationSnapshot.docs) {
-        final data = doc.data();
-        final key = '${data['lessonInstanceId']}_${data['studentId']}';
-        reservationMap[key] = data['status'];
-      }
-
-      final Map<String, List<_CalendarItem>> newItems = {};
-      final DateFormat formatter = DateFormat('yyyy-MM-dd');
-
-      for (var doc in lessonSnapshot.docs) {
-        final lesson = LessonInstance.fromMap(doc.data(), doc.id);
-        final dateString = formatter.format(lesson.startTime);
-
-        for (var student in _myChildren) {
-          bool shouldShow = false;
-          String status = 'none';
-
-          // A. 固定クラス所属チェック
-          for (var enrollment in student.enrollments) {
-            if (enrollment.groupId == lesson.classGroupId) {
-              final lessonDate = DateTime(lesson.startTime.year, lesson.startTime.month, lesson.startTime.day);
-              final startDate = DateTime(enrollment.startDate.year, enrollment.startDate.month, enrollment.startDate.day);
-              
-              bool isAfterStart = !lessonDate.isBefore(startDate);
-              bool isBeforeEnd = true;
-              if (enrollment.endDate != null) {
-                final endDate = DateTime(enrollment.endDate!.year, enrollment.endDate!.month, enrollment.endDate!.day);
-                if (lessonDate.isAfter(endDate)) isBeforeEnd = false;
-              }
-
-              if (isAfterStart && isBeforeEnd) {
-                shouldShow = true;
-                status = 'enrolled';
-              }
-            }
-          }
-
-          // B. 予約チェック
-          final resKey = '${lesson.id}_${student.id}';
-          if (reservationMap.containsKey(resKey)) {
-            shouldShow = true;
-            status = reservationMap[resKey] == 'approved' ? 'booked' : 'pending';
-          }
-
-          if (shouldShow) {
-            final item = _CalendarItem(
-              lesson: lesson,
-              student: student,
-              status: status,
-            );
-            
-            if (newItems[dateString] == null) {
-              newItems[dateString] = [];
-            }
-            newItems[dateString]!.add(item);
-          }
-        }
-      }
-
-      if (mounted) {
-        setState(() {
-          _calendarItemsByDay = newItems;
-        });
-      }
-    });
-  }
-
-  List<_CalendarItem> _getEventsForDay(DateTime day) {
-    final String dateString = DateFormat('yyyy-MM-dd').format(day);
-    return _calendarItemsByDay[dateString] ?? [];
-  }
-  
-  Future<void> _cancelReservation(String lessonId, String reservationId, String currentStatus) async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('予約のキャンセル'),
-        content: const Text('この予約を取り消しますか？'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('いいえ')),
-          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('はい', style: TextStyle(color: Colors.red))),
-        ],
-      ),
-    );
-
-    if (confirm != true) return;
-
-    try {
-      await FirebaseFirestore.instance.runTransaction((transaction) async {
-        final reservationRef = FirebaseFirestore.instance.collection('reservations').doc(reservationId);
-        final lessonRef = FirebaseFirestore.instance.collection('lessonInstances').doc(lessonId);
-
-        DocumentSnapshot<Map<String, dynamic>>? lessonSnapshot;
-        if (currentStatus == 'approved') {
-          lessonSnapshot = await transaction.get(lessonRef);
-        }
-
-        transaction.update(reservationRef, {'status': 'cancelled'});
-
-        if (currentStatus == 'approved' && lessonSnapshot != null && lessonSnapshot.exists) {
-            final currentBookings = lessonSnapshot.data()!['currentBookings'] as int? ?? 1;
-            final newCount = currentBookings > 0 ? currentBookings - 1 : 0;
-            transaction.update(lessonRef, {'currentBookings': newCount});
-        }
-      });
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('予約を取り消しました。')));
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('エラー: $e')));
-      }
-    }
-  }
-
 
   @override
   Widget build(BuildContext context) {
-    final events = _getEventsForDay(_selectedDay ?? _focusedDay);
+    if (_isLoadingChildren) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    if (_myChildren.isEmpty) return _buildNoChildrenView();
+
+    final studentIds = _myChildren.map((s) => s.id).toList();
+
+    return StreamBuilder<QuerySnapshot>(
+      stream: FirebaseFirestore.instance
+          .collection('lessonInstances')
+          .where('isCancelled', isEqualTo: false)
+          .snapshots(),
+      builder: (context, lessonSnap) {
+        return StreamBuilder<QuerySnapshot>(
+          stream: FirebaseFirestore.instance
+              .collection('reservations')
+              .where('studentId', whereIn: studentIds)
+              .where('status', whereIn: ['pending', 'approved'])
+              .snapshots(),
+          builder: (context, resSnap) {
+            return StreamBuilder<QuerySnapshot>(
+              stream: FirebaseFirestore.instance
+                  .collection('tickets')
+                  .where('studentId', whereIn: studentIds)
+                  .snapshots(),
+              builder: (context, ticketSnap) {
+                if (!lessonSnap.hasData || !resSnap.hasData || !ticketSnap.hasData) {
+                  return const Scaffold(body: Center(child: CircularProgressIndicator()));
+                }
+
+                final calendarItems = _generateCalendarItems(
+                  lessonSnap.data!.docs,
+                  resSnap.data!.docs,
+                  ticketSnap.data!.docs,
+                );
+
+                return _buildMainScreen(calendarItems);
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Map<String, List<_CalendarItem>> _generateCalendarItems(
+    List<QueryDocumentSnapshot> lessonDocs,
+    List<QueryDocumentSnapshot> resDocs,
+    List<QueryDocumentSnapshot> ticketDocs,
+  ) {
+    final Map<String, List<_CalendarItem>> itemsByDay = {};
+    final DateFormat formatter = DateFormat('yyyy-MM-dd');
+
+    // 全レッスン情報のマップ (ID検索用)
+    final Map<String, LessonInstance> allLessonsMap = {
+      for (var doc in lessonDocs) 
+        doc.id: LessonInstance.fromMap(doc.data() as Map<String, dynamic>, doc.id)
+    };
+
+    // 予約データ
+    final Map<String, QueryDocumentSnapshot> resMap = {};
+    final Map<String, QueryDocumentSnapshot> transferSourceMap = {};
+    
+    // 予約ID -> 予約データ (チケット経由での参照用)
+    final Map<String, Map<String, dynamic>> allResByIdMap = {
+      for (var doc in resDocs)
+        doc.id: doc.data() as Map<String, dynamic>
+    };
+
+    for (var doc in resDocs) {
+      final data = doc.data() as Map<String, dynamic>;
+      final key = '${data['lessonInstanceId']}_${data['studentId']}';
+      resMap[key] = doc;
+
+      if (data['originalLessonId'] != null) {
+        final sourceKey = '${data['originalLessonId']}_${data['studentId']}';
+        transferSourceMap[sourceKey] = doc;
+      }
+    }
+
+    // チケットデータ
+    final Map<String, QueryDocumentSnapshot> ticketMap = {};
+    for (var doc in ticketDocs) {
+      final data = doc.data() as Map<String, dynamic>;
+      if (data['sourceLessonId'] != null) {
+        final key = '${data['sourceLessonId']}_${data['studentId']}';
+        ticketMap[key] = doc;
+      }
+    }
+
+    // レッスンスキャン
+    for (var doc in lessonDocs) {
+      final lesson = LessonInstance.fromMap(doc.data() as Map<String, dynamic>, doc.id);
+      final dateString = formatter.format(lesson.startTime);
+
+      for (var student in _myChildren) {
+        bool shouldShow = false;
+        String status = 'none';
+        String? reservationId;
+        Ticket? internalTicket;
+        
+        // ★追加: 振替関係の情報
+        LessonInstance? destinationLesson; // 振替先
+        LessonInstance? sourceLesson;      // 振替元
+
+        final uniqueKey = '${lesson.id}_${student.id}';
+
+        // A. 所属クラスチェック
+        bool isEnrolled = false;
+        for (var enrollment in student.enrollments) {
+          if (enrollment.groupId == lesson.classGroupId) {
+            final lessonDate = DateTime(lesson.startTime.year, lesson.startTime.month, lesson.startTime.day);
+            final startDate = DateTime(enrollment.startDate.year, enrollment.startDate.month, enrollment.startDate.day);
+            bool isAfterStart = !lessonDate.isBefore(startDate);
+            bool isBeforeEnd = true;
+            if (enrollment.endDate != null) {
+              final endDate = DateTime(enrollment.endDate!.year, enrollment.endDate!.month, enrollment.endDate!.day);
+              if (lessonDate.isAfter(endDate)) isBeforeEnd = false;
+            }
+            if (isAfterStart && isBeforeEnd) {
+              isEnrolled = true;
+            }
+          }
+        }
+
+        if (isEnrolled) {
+          shouldShow = true;
+          status = 'enrolled'; 
+
+          if (transferSourceMap.containsKey(uniqueKey)) {
+            status = 'ticket_used'; 
+            // ★追加: 直接振替の場合の振替先情報を取得
+            final resDoc = transferSourceMap[uniqueKey]!;
+            final resData = resDoc.data() as Map<String, dynamic>;
+            final destId = resData['lessonInstanceId'];
+            destinationLesson = allLessonsMap[destId];
+          }
+          else if (ticketMap.containsKey(uniqueKey)) {
+            final tData = ticketMap[uniqueKey]!.data() as Map<String, dynamic>;
+            internalTicket = Ticket.fromMap(tData, ticketMap[uniqueKey]!.id);
+            final validLevelId = tData['validLevelId'];
+            final isUsed = tData['isUsed'] ?? false;
+
+            if (validLevelId == 'forfeited') {
+              status = 'absent_no_transfer'; 
+            } else if (isUsed) {
+              status = 'ticket_used'; 
+              // ★追加: チケット経由で振替先情報を取得
+              final usedResId = tData['usedForReservationId'];
+              if (usedResId != null && allResByIdMap.containsKey(usedResId)) {
+                final resData = allResByIdMap[usedResId]!;
+                final destId = resData['lessonInstanceId'];
+                destinationLesson = allLessonsMap[destId];
+              }
+            } else {
+              status = 'ticket_pending'; 
+            }
+          }
+        }
+
+        // B. 予約チェック
+        if (resMap.containsKey(uniqueKey)) {
+          shouldShow = true;
+          final rData = resMap[uniqueKey]!.data() as Map<String, dynamic>;
+          status = rData['status'] == 'approved' ? 'booked' : 'pending';
+          reservationId = resMap[uniqueKey]!.id;
+          
+          // ★追加: 振替元情報を取得
+          if (rData['originalLessonId'] != null) {
+            final orgId = rData['originalLessonId'];
+            sourceLesson = allLessonsMap[orgId];
+          }
+        }
+
+        if (shouldShow) {
+          final item = _CalendarItem(
+            lesson: lesson,
+            student: student,
+            status: status,
+            reservationId: reservationId,
+            internalTicket: internalTicket,
+            destinationLesson: destinationLesson, // 追加
+            sourceLesson: sourceLesson,           // 追加
+          );
+          if (itemsByDay[dateString] == null) itemsByDay[dateString] = [];
+          itemsByDay[dateString]!.add(item);
+        }
+      }
+    }
+    return itemsByDay;
+  }
+
+  Widget _buildMainScreen(Map<String, List<_CalendarItem>> itemsByDay) {
+    final events = itemsByDay[DateFormat('yyyy-MM-dd').format(_selectedDay ?? _focusedDay)] ?? [];
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('保護者ホーム'),
+        title: const Text('ホーム'),
         backgroundColor: Colors.blue.shade700,
         actions: [
           IconButton(
+            icon: const Icon(Icons.history),
+            tooltip: '振替履歴',
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const TransferHistoryScreen())),
+          ),
+          IconButton(
             icon: const Icon(Icons.person_add),
-            tooltip: '兄弟を追加',
             onPressed: () async {
-              await Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const StudentLinkScreen()),
-              );
-              _fetchMyChildrenAndLessons();
+              await Navigator.push(context, MaterialPageRoute(builder: (_) => const StudentLinkScreen()));
+              _fetchMyChildren();
             },
           ),
           IconButton(
@@ -254,135 +306,720 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
           )
         ],
       ),
-      body: _isLoading 
-        ? const Center(child: CircularProgressIndicator())
-        : _myChildren.isEmpty 
-          ? _buildNoChildrenView()
-          : SingleChildScrollView(
-              child: Column(
-                children: [
-                  TableCalendar(
-                    firstDay: DateTime.utc(2024, 1, 1),
-                    lastDay: DateTime.utc(2030, 12, 31),
-                    focusedDay: _focusedDay,
-                    calendarFormat: _calendarFormat,
-                    locale: 'ja_JP',
-                    eventLoader: _getEventsForDay,
-                    selectedDayPredicate: (day) => isSameDay(_selectedDay, day),
-                    onDaySelected: (selectedDay, focusedDay) {
-                      if (!isSameDay(_selectedDay, selectedDay)) {
-                        setState(() {
-                          _selectedDay = selectedDay;
-                          _focusedDay = focusedDay;
-                        });
-                      }
-                    },
-                    onPageChanged: (focusedDay) {
-                      _focusedDay = focusedDay;
-                    },
-                    calendarStyle: CalendarStyle(
-                      selectedDecoration: const BoxDecoration(color: Colors.blue, shape: BoxShape.circle),
-                      markersAlignment: Alignment.bottomRight,
-                      markerDecoration: BoxDecoration(color: Colors.red.shade600, shape: BoxShape.circle),
-                    ),
-                    headerStyle: const HeaderStyle(formatButtonVisible: false, titleCentered: true),
-                  ),
-                  const Divider(height: 1),
-                  
-                  const Padding(
-                    padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-                    child: Text("予定リスト", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                  ),
-
-                  if (events.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.all(16.0),
-                      child: Text("この日の予定はありません。", style: TextStyle(color: Colors.black54)),
-                    ),
-
-                  ...events.map((item) => _buildLessonTile(item)).toList(),
-                  
-                  const SizedBox(height: 40),
-                ],
+      body: SingleChildScrollView(
+        child: Column(
+          children: [
+            TableCalendar(
+              firstDay: DateTime.utc(2024, 1, 1),
+              lastDay: DateTime.utc(2030, 12, 31),
+              focusedDay: _focusedDay,
+              calendarFormat: _calendarFormat,
+              locale: 'ja_JP',
+              eventLoader: (day) {
+                final allEvents = itemsByDay[DateFormat('yyyy-MM-dd').format(day)] ?? [];
+                return allEvents.where((item) {
+                  return item.status != 'ticket_used' && item.status != 'absent_no_transfer';
+                }).toList();
+              },
+              selectedDayPredicate: (day) => isSameDay(_selectedDay, day),
+              onDaySelected: (selectedDay, focusedDay) {
+                if (!isSameDay(_selectedDay, selectedDay)) {
+                  setState(() {
+                    _selectedDay = selectedDay;
+                    _focusedDay = focusedDay;
+                  });
+                }
+              },
+              onPageChanged: (focusedDay) => _focusedDay = focusedDay,
+              calendarStyle: CalendarStyle(
+                selectedDecoration: const BoxDecoration(color: Colors.blue, shape: BoxShape.circle),
+                markerDecoration: BoxDecoration(color: Colors.red.shade600, shape: BoxShape.circle),
               ),
+              headerStyle: const HeaderStyle(formatButtonVisible: false, titleCentered: true),
             ),
-    );
-  }
-
-  Widget _buildNoChildrenView() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Text('生徒情報が登録されていません'),
-          const SizedBox(height: 20),
-          ElevatedButton(
-            onPressed: () async {
-              await Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const StudentLinkScreen()),
-              );
-              _fetchMyChildrenAndLessons();
-            },
-            child: const Text('生徒IDを入力して紐付ける'),
-          ),
-        ],
+            const Divider(height: 1),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: Text("予定リスト", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            ),
+            if (events.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(16.0),
+                child: Text("この日の予定はありません。", style: TextStyle(color: Colors.black54)),
+              ),
+            ...events.map((item) => _buildLessonTile(item)).toList(),
+            const SizedBox(height: 40),
+          ],
+        ),
       ),
     );
   }
 
-  // ★修正: レッスンタイルの表示内容を変更
+  Widget _buildNoChildrenView() {
+    return Scaffold(
+      appBar: AppBar(title: const Text('ホーム')),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text('生徒情報が登録されていません'),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: () async {
+                await Navigator.push(context, MaterialPageRoute(builder: (_) => const StudentLinkScreen()));
+                _fetchMyChildren();
+              },
+              child: const Text('生徒IDを入力して紐付ける'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildLessonTile(_CalendarItem item) {
     final lesson = item.lesson;
     final student = item.student;
-    
     String statusText = '';
     Color statusColor = Colors.grey;
-    VoidCallback? onCancel;
+    Color cardColor = Colors.white;
 
-    // コース名・レベル名を取得
     final courseLevelName = _getCourseAndLevelName(lesson.levelId);
     
     switch (item.status) {
       case 'enrolled':
-        statusText = '所属クラス';
+        statusText = '受講中';
         statusColor = Colors.blueGrey;
+        cardColor = Colors.blue.shade50;
         break;
       case 'booked':
-        statusText = '予約済';
+        statusText = '振替レッスン';
         statusColor = Colors.red;
-        // 予約IDを取得してキャンセル処理へ
-        // (簡易実装のため再検索ロジックは省略、本来はitemにreservationIdを持たせるべき)
+        cardColor = Colors.red.shade50;
         break;
       case 'pending':
         statusText = '申請中';
         statusColor = Colors.orange;
         break;
+      case 'ticket_used':
+        statusText = '欠席(振替予約済)';
+        statusColor = Colors.grey;
+        cardColor = Colors.grey.shade200;
+        break;
+      case 'ticket_pending':
+        statusText = '振替検討中';
+        statusColor = Colors.green;
+        cardColor = Colors.green.shade50;
+        break;
+      case 'absent_no_transfer':
+        statusText = '欠席(振替なし)';
+        statusColor = Colors.grey;
+        cardColor = Colors.grey.shade300;
+        break;
     }
 
     return Card(
+      color: cardColor,
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       child: ListTile(
         leading: CircleAvatar(
-          backgroundColor: Colors.indigo.shade100,
+          backgroundColor: (item.status.contains('ticket') || item.status.contains('absent')) 
+              ? Colors.grey.shade400 
+              : (item.status == 'ticket_pending' ? Colors.green.shade100 : Colors.indigo.shade100),
           child: Text(student.firstName.isNotEmpty ? student.firstName[0] : '?', style: const TextStyle(fontWeight: FontWeight.bold)),
         ),
-        // 変更点1: 名前＋さん, 先生名ではなくコース・レベル名を表示
-        title: Text('${student.firstName}さん: $courseLevelName', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+        title: Text('${student.firstName}さん: $courseLevelName', 
+          style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, 
+            color: (item.status.contains('ticket') || item.status.contains('absent')) ? Colors.grey.shade700 : Colors.black)),
         
-        // 変更点2: 時間の後に先生名を表示
-        subtitle: Text(
-          '${DateFormat('HH:mm').format(lesson.startTime)} - ${DateFormat('HH:mm').format(lesson.endTime)}  ${lesson.teacherName}先生',
-          style: const TextStyle(fontSize: 13)
+        // ★修正: サブタイトルをカスタマイズして詳細情報を表示
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '${DateFormat('M/d(E) HH:mm', 'ja').format(lesson.startTime)} - ${DateFormat('HH:mm').format(lesson.endTime)}  ${lesson.teacherName}先生',
+              style: const TextStyle(fontSize: 13)
+            ),
+            
+            // 1. 振替先 (ticket_used の場合)
+            if (item.status == 'ticket_used' && item.destinationLesson != null) ...[
+              const SizedBox(height: 4),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(Icons.arrow_forward, size: 14, color: Colors.blue),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      '${DateFormat('M/d(E) HH:mm', 'ja').format(item.destinationLesson!.startTime)}-${DateFormat('HH:mm').format(item.destinationLesson!.endTime)} ${item.destinationLesson!.teacherName}先生 に振替予約済み',
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.blue),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+
+            // 2. 振替元 (booked の場合)
+            if (item.status == 'booked' && item.sourceLesson != null) ...[
+              const SizedBox(height: 4),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(Icons.arrow_back, size: 14, color: Colors.red),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      '${DateFormat('M/d(E) HH:mm', 'ja').format(item.sourceLesson!.startTime)}-${DateFormat('HH:mm').format(item.sourceLesson!.endTime)} ${item.sourceLesson!.teacherName}先生 から振替',
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.red),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ],
         ),
         
         trailing: Chip(
-          label: Text(statusText, style: const TextStyle(color: Colors.white, fontSize: 12)),
+          label: Text(statusText, style: const TextStyle(color: Colors.white, fontSize: 11)),
           backgroundColor: statusColor,
         ),
-        // タップ時の処理（キャンセルなど）は別途実装
+        onTap: () {
+          if (item.status == 'ticket_pending') {
+             _goToTransferSelection(item);
+          } else {
+             _showLessonActionMenu(item);
+          }
+        },
       ),
     );
+  }
+
+  // (以降のメソッド _goToTransferSelection, _showLessonActionMenu, 
+  //  _registerAbsence, _undoAbsence, _changeToForfeited, 
+  //  _reviveToPending, _cancelReservationToPending, _cancelReservationToForfeited,
+  //  _cancelAllAndReturn は変更ありませんが、ファイル全体を貼るため以下に含めます)
+
+  void _goToTransferSelection(_CalendarItem item) {
+    String levelId = item.lesson.levelId; 
+    if (levelId.isEmpty) {
+      levelId = _groupToLevel[item.lesson.classGroupId] ?? '';
+    }
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => TransferLessonSelectorScreen(
+          student: item.student,
+          currentLesson: item.lesson,
+          targetLevelId: levelId,
+          useTicket: item.internalTicket, 
+        ),
+      ),
+    );
+  }
+
+  void _showLessonActionMenu(_CalendarItem item) {
+    String levelId = item.lesson.levelId; 
+    if (levelId.isEmpty) {
+      levelId = _groupToLevel[item.lesson.classGroupId] ?? '';
+    }
+
+    showModalBottomSheet(
+      context: context,
+      builder: (context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.info),
+                title: Text('${item.student.firstName}さんのレッスン'),
+                subtitle: Text(DateFormat('M/d HH:mm~').format(item.lesson.startTime)),
+              ),
+              const Divider(),
+              
+              if (item.status == 'booked') ...[
+                ListTile(
+                  leading: const Icon(Icons.edit_calendar, color: Colors.green),
+                  title: const Text('A. 日程を変更する'),
+                  subtitle: const Text('現在の予約をキャンセルし、別の日に変更します'),
+                  onTap: () {
+                    Navigator.pop(context);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => TransferLessonSelectorScreen(
+                          student: item.student,
+                          currentLesson: item.lesson, 
+                          currentReservationId: item.reservationId, 
+                          targetLevelId: levelId,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.undo, color: Colors.blue),
+                  title: const Text('B. 保留に戻す (予約キャンセル)'),
+                  subtitle: const Text('予約をキャンセルし、緑色の状態に戻します'),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    await _cancelReservationToPending(item.reservationId!, item.lesson.id);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.close, color: Colors.red),
+                  title: const Text('C. 出席に戻す (全キャンセル)'),
+                  subtitle: const Text('振替をやめて、元のレッスンに出席します'),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    await _cancelAllAndReturn(item.reservationId!, item.lesson.id);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.block, color: Colors.grey),
+                  title: const Text('D. 振替をやめる (振替なし欠席)'),
+                  subtitle: const Text('予約をキャンセルし、振替の権利も放棄します'),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    await _cancelReservationToForfeited(item.reservationId!, item.lesson.id);
+                  },
+                ),
+              ] 
+              else if (item.status == 'enrolled') ...[
+                ListTile(
+                  leading: const Icon(Icons.swap_horiz, color: Colors.blue),
+                  title: const Text('① 別の日に振り替える'),
+                  subtitle: const Text('すぐに振替先を予約します'),
+                  onTap: () {
+                    Navigator.pop(context); 
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => TransferLessonSelectorScreen(
+                          student: item.student,
+                          currentLesson: item.lesson,
+                          targetLevelId: levelId,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.pause_circle_outline, color: Colors.green),
+                  title: const Text('② とりあえず欠席 (保留)'),
+                  subtitle: const Text('後で振替日を決めます (緑色になります)'),
+                  onTap: () async {
+                    Navigator.pop(context); 
+                    await _registerAbsence(item.lesson, item.student, isForfeited: false);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.block, color: Colors.grey),
+                  title: const Text('③ 欠席する (振替不要)'),
+                  subtitle: const Text('振替をせず欠席します'),
+                  onTap: () async {
+                    Navigator.pop(context); 
+                    await _registerAbsence(item.lesson, item.student, isForfeited: true);
+                  },
+                ),
+              ]
+              else if (item.status == 'ticket_pending') ...[
+                ListTile(
+                  leading: const Icon(Icons.check_circle_outline, color: Colors.red),
+                  title: const Text('A. 振替予約する'),
+                  subtitle: const Text('振替先のレッスンを選択します'),
+                  onTap: () {
+                    Navigator.pop(context);
+                    _goToTransferSelection(item);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.undo, color: Colors.blue),
+                  title: const Text('C. 出席に戻す (欠席キャンセル)'),
+                  subtitle: const Text('欠席を取り消し、出席に戻します'),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    await _undoAbsence(item.lesson, item.student);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.block, color: Colors.grey),
+                  title: const Text('D. 振替をやめる (欠席確定)'),
+                  subtitle: const Text('振替の権利を放棄して欠席扱いにします'),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    await _changeToForfeited(item.internalTicket!);
+                  },
+                ),
+              ]
+              else if (item.status == 'absent_no_transfer') ...[
+                const ListTile(title: Text('振替なし欠席として登録されています')),
+                ListTile(
+                  leading: const Icon(Icons.edit_calendar, color: Colors.green),
+                  title: const Text('A. 振替予約する (復活)'),
+                  subtitle: const Text('振替権利を復活させて予約します'),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    await _reviveToPending(item.internalTicket!, item.lesson);
+                    _goToTransferSelection(item);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.pause_circle_outline, color: Colors.green),
+                  title: const Text('B. 振替を保留にする'),
+                  subtitle: const Text('緑色の「振替検討中」に戻します'),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    await _reviveToPending(item.internalTicket!, item.lesson);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.undo, color: Colors.blue),
+                  title: const Text('C. 出席に戻す (取り消し)'),
+                  subtitle: const Text('欠席を取り消し、出席に戻します'),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    await _undoAbsence(item.lesson, item.student);
+                  },
+                ),
+              ]
+              else if (item.status == 'ticket_used') ...[
+                const ListTile(title: Text('欠席または振替予約済みです')),
+                ListTile(
+                  leading: const Icon(Icons.undo, color: Colors.blue),
+                  title: const Text('C. 出席に戻す (全キャンセル)'),
+                  subtitle: const Text('振替先もキャンセルし、出席に戻します'),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    await _undoAbsence(item.lesson, item.student);
+                  },
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _registerAbsence(LessonInstance lesson, Student student, {required bool isForfeited}) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(isForfeited ? '欠席しますか？' : '欠席・保留'),
+        content: Text(isForfeited ? '振替なしで欠席します。' : '保留状態(緑色)にします。後で予約できます。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('いいえ')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('はい')),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    try {
+      await FirebaseFirestore.instance.runTransaction((transaction) async {
+        final lessonRef = FirebaseFirestore.instance.collection('lessonInstances').doc(lesson.id);
+        final ticketRef = FirebaseFirestore.instance.collection('tickets').doc();
+        
+        final lessonSnap = await transaction.get(lessonRef);
+        if (lessonSnap.exists) {
+          final current = lessonSnap.data()!['currentBookings'] as int? ?? 1;
+          transaction.update(lessonRef, {'currentBookings': current > 0 ? current - 1 : 0});
+        }
+
+        final lessonDate = lesson.startTime;
+        final expiryDate = DateTime(lessonDate.year, lessonDate.month + 2, lessonDate.day); 
+        final timeStr = '${DateFormat('HH:mm').format(lesson.startTime)}～${DateFormat('HH:mm').format(lesson.endTime)}';
+        
+        String levelId = lesson.levelId.isNotEmpty ? lesson.levelId : (_groupToLevel[lesson.classGroupId] ?? '');
+
+        transaction.set(ticketRef, {
+          'studentId': student.id,
+          'validLevelId': isForfeited ? 'forfeited' : levelId,
+          'validLevelName': isForfeited ? '振替なし' : _getCourseAndLevelName(levelId),
+          'issueDate': FieldValue.serverTimestamp(),
+          'originDate': lessonDate, 
+          'originTimeRange': timeStr,
+          'expiryDate': expiryDate,
+          'isUsed': isForfeited ? true : false, 
+          'sourceLessonId': lesson.id, 
+        });
+      });
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('登録しました')));
+    } catch (e) {
+      print(e);
+    }
+  }
+
+  Future<void> _undoAbsence(LessonInstance lesson, Student student) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('出席に戻しますか？'),
+        content: const Text('欠席・振替を取り消し、元のレッスンに出席する状態に戻します。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('いいえ')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('はい')),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    try {
+      final ticketSnap = await FirebaseFirestore.instance
+          .collection('tickets')
+          .where('studentId', isEqualTo: student.id)
+          .where('sourceLessonId', isEqualTo: lesson.id)
+          .limit(1)
+          .get();
+      
+      if (ticketSnap.docs.isEmpty) return;
+      final ticketDoc = ticketSnap.docs.first;
+      final reservationId = ticketDoc.data()['usedForReservationId'] as String?;
+
+      await FirebaseFirestore.instance.runTransaction((transaction) async {
+        final lessonRef = FirebaseFirestore.instance.collection('lessonInstances').doc(lesson.id);
+        final lessonSnap = await transaction.get(lessonRef);
+        
+        DocumentSnapshot<Map<String, dynamic>>? resSnap;
+        DocumentSnapshot<Map<String, dynamic>>? destLessonSnap;
+        DocumentReference<Map<String, dynamic>>? destRef;
+
+        if (reservationId != null) {
+           final resRef = FirebaseFirestore.instance.collection('reservations').doc(reservationId);
+           resSnap = await transaction.get(resRef);
+           
+           if (resSnap.exists && resSnap.data()!['status'] == 'approved') {
+             final destId = resSnap.data()!['lessonInstanceId'] as String;
+             destRef = FirebaseFirestore.instance.collection('lessonInstances').doc(destId);
+             destLessonSnap = await transaction.get(destRef!);
+           }
+        }
+
+        if (lessonSnap.exists) {
+          final current = lessonSnap.data()!['currentBookings'] as int? ?? 0;
+          transaction.update(lessonRef, {'currentBookings': current + 1});
+        }
+
+        if (resSnap != null && resSnap.exists) {
+           transaction.update(resSnap.reference, {'status': 'cancelled'});
+           if (destLessonSnap != null && destLessonSnap.exists && destRef != null) {
+             final cur = destLessonSnap.data()!['currentBookings'] as int? ?? 1;
+             transaction.update(destRef!, {'currentBookings': cur > 0 ? cur - 1 : 0});
+           }
+        }
+        transaction.delete(ticketDoc.reference);
+      });
+      
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('出席に戻しました')));
+    } catch (e) {
+      print(e);
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('エラー: $e')));
+    }
+  }
+
+  Future<void> _changeToForfeited(Ticket ticket) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('振替をやめますか？'),
+        content: const Text('このレッスンの振替権利を放棄し、「欠席（振替なし）」の状態にします。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('いいえ')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('はい')),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    try {
+      await FirebaseFirestore.instance.collection('tickets').doc(ticket.id).update({
+        'validLevelId': 'forfeited',
+        'validLevelName': '振替なし',
+        'isUsed': true, 
+      });
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('変更しました')));
+    } catch (e) {
+      print(e);
+    }
+  }
+
+  Future<void> _reviveToPending(Ticket ticket, LessonInstance lesson) async {
+    try {
+      String levelId = lesson.levelId.isNotEmpty ? lesson.levelId : (_groupToLevel[lesson.classGroupId] ?? '');
+      String levelName = _getCourseAndLevelName(levelId);
+
+      await FirebaseFirestore.instance.collection('tickets').doc(ticket.id).update({
+        'validLevelId': levelId,
+        'validLevelName': levelName,
+        'isUsed': false,
+      });
+    } catch (e) {
+      print(e);
+    }
+  }
+
+  Future<void> _cancelReservationToPending(String reservationId, String lessonId) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('予約キャンセル'),
+        content: const Text('予約をキャンセルし、振替検討中(緑)に戻しますか？'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('いいえ')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('はい')),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    try {
+      await FirebaseFirestore.instance.runTransaction((transaction) async {
+        final resRef = FirebaseFirestore.instance.collection('reservations').doc(reservationId);
+        final lessonRef = FirebaseFirestore.instance.collection('lessonInstances').doc(lessonId); 
+        
+        final resSnap = await transaction.get(resRef);
+        if (!resSnap.exists) throw Exception("予約が見つかりません");
+        final ticketId = resSnap.data()?['usedTicketId'] as String?;
+        
+        final lessonSnap = await transaction.get(lessonRef);
+
+        transaction.update(resRef, {'status': 'cancelled'});
+        
+        if (lessonSnap.exists) {
+           final current = lessonSnap.data()!['currentBookings'] as int? ?? 1;
+           transaction.update(lessonRef, {'currentBookings': current > 0 ? current - 1 : 0});
+        }
+
+        if (ticketId != null) {
+          final ticketRef = FirebaseFirestore.instance.collection('tickets').doc(ticketId);
+          transaction.update(ticketRef, {
+            'isUsed': false,
+            'usedForReservationId': FieldValue.delete(),
+            'usedForDate': FieldValue.delete(),
+            'usedForTimeRange': FieldValue.delete(),
+          });
+        }
+      });
+
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('保留に戻しました。')));
+    } catch (e) {
+      print(e);
+    }
+  }
+
+  Future<void> _cancelReservationToForfeited(String reservationId, String lessonId) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('振替をやめますか？'),
+        content: const Text('予約をキャンセルし、振替の権利も放棄して欠席扱いにします。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('いいえ')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('はい')),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    try {
+      await FirebaseFirestore.instance.runTransaction((transaction) async {
+        final resRef = FirebaseFirestore.instance.collection('reservations').doc(reservationId);
+        final lessonRef = FirebaseFirestore.instance.collection('lessonInstances').doc(lessonId); 
+        
+        final resSnap = await transaction.get(resRef);
+        if (!resSnap.exists) throw Exception("予約が見つかりません");
+        final ticketId = resSnap.data()?['usedTicketId'] as String?;
+        
+        final lessonSnap = await transaction.get(lessonRef);
+
+        transaction.update(resRef, {'status': 'cancelled'});
+        
+        if (lessonSnap.exists) {
+           final current = lessonSnap.data()!['currentBookings'] as int? ?? 1;
+           transaction.update(lessonRef, {'currentBookings': current > 0 ? current - 1 : 0});
+        }
+
+        if (ticketId != null) {
+          final ticketRef = FirebaseFirestore.instance.collection('tickets').doc(ticketId);
+          transaction.update(ticketRef, {
+            'validLevelId': 'forfeited',
+            'validLevelName': '振替なし',
+            'isUsed': true,
+            'usedForReservationId': FieldValue.delete(),
+            'usedForDate': FieldValue.delete(),
+            'usedForTimeRange': FieldValue.delete(),
+          });
+        }
+      });
+
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('振替をキャンセルしました。')));
+    } catch (e) {
+      print(e);
+    }
+  }
+
+  Future<void> _cancelAllAndReturn(String reservationId, String lessonId) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('出席に戻しますか？'),
+        content: const Text('振替予約をキャンセルし、元のレッスンに出席します。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('いいえ')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('はい')),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    try {
+      await FirebaseFirestore.instance.runTransaction((transaction) async {
+        final resRef = FirebaseFirestore.instance.collection('reservations').doc(reservationId);
+        final lessonRef = FirebaseFirestore.instance.collection('lessonInstances').doc(lessonId); 
+        
+        final resSnap = await transaction.get(resRef);
+        final ticketId = resSnap.data()?['usedTicketId'] as String?;
+        
+        DocumentReference<Map<String, dynamic>>? orgLessonRef;
+        DocumentReference<Map<String, dynamic>>? ticketRef;
+        DocumentSnapshot<Map<String, dynamic>>? ticketSnap;
+        DocumentSnapshot<Map<String, dynamic>>? orgSnap;
+
+        if (ticketId != null) {
+          ticketRef = FirebaseFirestore.instance.collection('tickets').doc(ticketId);
+          ticketSnap = await transaction.get(ticketRef);
+          if (ticketSnap.exists) {
+            final orgId = ticketSnap.data()!['sourceLessonId'] as String?;
+            if (orgId != null) {
+              orgLessonRef = FirebaseFirestore.instance.collection('lessonInstances').doc(orgId);
+              orgSnap = await transaction.get(orgLessonRef); 
+            }
+          }
+        }
+
+        final lessonSnap = await transaction.get(lessonRef);
+
+        if (ticketRef != null && ticketSnap != null && ticketSnap.exists) {
+            transaction.delete(ticketRef);
+        }
+
+        transaction.update(resRef, {'status': 'cancelled'});
+        
+        if (lessonSnap.exists) {
+           final current = lessonSnap.data()!['currentBookings'] as int? ?? 1;
+           transaction.update(lessonRef, {'currentBookings': current > 0 ? current - 1 : 0});
+        }
+
+        if (orgLessonRef != null && orgSnap != null && orgSnap.exists) {
+            final current = orgSnap.data()!['currentBookings'] as int? ?? 0;
+            transaction.update(orgLessonRef!, {'currentBookings': current + 1});
+        }
+      });
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('出席に戻しました')));
+    } catch (e) {
+      print(e);
+    }
   }
 }
 
@@ -390,6 +1027,18 @@ class _CalendarItem {
   final LessonInstance lesson;
   final Student student;
   final String status; 
-
-  _CalendarItem({required this.lesson, required this.student, required this.status});
+  final String? reservationId;
+  final Ticket? internalTicket;
+  final LessonInstance? destinationLesson;
+  final LessonInstance? sourceLesson;
+  
+  _CalendarItem({
+    required this.lesson, 
+    required this.student, 
+    required this.status, 
+    this.reservationId,
+    this.internalTicket,
+    this.destinationLesson,
+    this.sourceLesson,
+  });
 }

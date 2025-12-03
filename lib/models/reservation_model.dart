@@ -33,6 +33,17 @@ class Reservation {
     };
   }
 
+factory Reservation.fromMap(Map<String, dynamic> data, String id) {
+  return Reservation(
+    id: id,
+    lessonInstanceId: data['lessonInstanceId'] ?? '',
+    studentId: data['studentId'] ?? '',
+    requestType: data['requestType'] ?? 'transfer',
+    status: data['status'] ?? 'pending',
+    requestedAt: data['requestedAt'] as Timestamp,
+    originalLessonId: data['originalLessonId'],
+  );
+}
   // Firestore Mapからの変換 (今回は省略)
   // factory Reservation.fromMap(...)
 }

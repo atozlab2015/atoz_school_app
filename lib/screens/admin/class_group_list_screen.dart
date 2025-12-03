@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:atoz_school_app/models/class_model.dart'; 
-// フォーム画面への相対パス
+import 'package:intl/intl.dart';
+import '../../models/class_model.dart'; 
 import '../data_entry/class_group_form_screen.dart'; 
 
 class ClassGroupListScreen extends StatelessWidget {
-  // ▼ 全ての親IDを受け取る
   final String subjectId; 
   final String subjectName; 
   final String courseId; 
@@ -27,14 +26,12 @@ class ClassGroupListScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('${levelName}：枠の設定'),
+        title: Text('$levelName：枠の設定'),
         backgroundColor: Colors.brown,
       ),
-      // FirestoreからLevel IDをフィルタして枠を取得
       body: StreamBuilder<QuerySnapshot>(
         stream: FirebaseFirestore.instance
-            .collection('groups') 
-            // ▼ Level IDでフィルタリング (インデックスが機能する部分)
+            .collection('classGroups') // 新しいコレクション
             .where('levelId', isEqualTo: levelId) 
             .snapshots(),
         builder: (context, snapshot) {
@@ -46,44 +43,56 @@ class ClassGroupListScreen extends StatelessWidget {
           final docs = snapshot.data!.docs;
 
           if (docs.isEmpty) {
-             return Center(child: Text('${levelName} にはまだ曜日・時間の枠がありません。右下のボタンから追加してください。'));
+             return Center(child: Text('$levelName にはまだ曜日・時間の枠がありません。\n右下のボタンから追加してください。', textAlign: TextAlign.center));
           }
           
           return ListView.builder(
             itemCount: docs.length,
             itemBuilder: (context, index) {
               final data = docs[index].data() as Map<String, dynamic>;
-              // ClassGroup モデルを使ってデータを構築 (ここでは簡易表示)
-              final group = ClassGroup( 
-                id: docs[index].id,
-                levelId: levelId,
-                teacherName: data['teacherName'] ?? '未設定',
-                dayOfWeek: data['dayOfWeek'] ?? '不明',
-                startTime: data['startTime'] ?? '00:00',
-                durationMinutes: data['durationMinutes'] ?? 0,
-                capacity: data['capacity'] ?? 0,
-                bookingType: data['bookingType'] ?? 'fixed',
-                // ▼ モデルのコンストラクタに追加されたIDも渡す必要があります (暫定値)
-                subjectId: data['subjectId'] ?? subjectId,
-                courseId: data['courseId'] ?? courseId,
-              );
+              final group = ClassGroup.fromMap(data, docs[index].id);
 
-              return ListTile(
-                title: Text('${group.dayOfWeek} ${group.startTime}（${group.teacherName}先生）'),
-                subtitle: Text('定員: ${group.capacity}名 / ${group.bookingType == 'fixed' ? '固定制' : '都度予約'}'),
-                trailing: IconButton(
-                  icon: const Icon(Icons.delete),
-                  onPressed: () => FirebaseFirestore.instance.collection('groups').doc(group.id).delete(),
+              String periodText = '';
+              if (group.validFrom != null || group.validTo != null) {
+                final from = group.validFrom != null ? DateFormat('yyyy/MM/dd').format(group.validFrom!) : '∞';
+                final to = group.validTo != null ? DateFormat('yyyy/MM/dd').format(group.validTo!) : '∞';
+                periodText = '\n有効期間: $from 〜 $to';
+              }
+
+              final typeText = group.bookingType == 'flexible' ? ' [予約制]' : ' [固定制]';
+
+              // ★修正: 曜日を漢字に変換 (マップを使用)
+              String dayStr = group.dayOfWeek.toString();
+              const days = {'1': '月', '2': '火', '3': '水', '4': '木', '5': '金', '6': '土', '7': '日'};
+              if (days.containsKey(dayStr)) {
+                dayStr = days[dayStr]!;
+              }
+
+              return Card(
+                child: ListTile(
+                  // 漢字の曜日を表示
+                  title: Text('$dayStr ${group.startTime}（${group.teacherName}先生）$typeText'),
+                  subtitle: Text('定員: ${group.capacity}名$periodText'),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.delete, color: Colors.grey),
+                    onPressed: () => _confirmDelete(context, group.id),
+                  ),
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => ClassGroupFormScreen(
+                          classGroup: group, 
+                        ),
+                      ),
+                    );
+                  },
                 ),
-                onTap: () {
-                  // TODO: 編集画面へ移動
-                },
               );
             },
           );
         },
       ),
-      // フォーム画面への遷移ロジック
       floatingActionButton: FloatingActionButton(
         child: const Icon(Icons.add),
         onPressed: () {
@@ -91,15 +100,36 @@ class ClassGroupListScreen extends StatelessWidget {
             context,
             MaterialPageRoute(
               builder: (context) => ClassGroupFormScreen(
-                // ▼ フォームに全階層IDを渡す
                 subjectId: subjectId,
                 courseId: courseId,
                 levelId: levelId,
-                levelName: levelName,
               ),
             ),
           );
         },
+      ),
+    );
+  }
+
+  void _confirmDelete(BuildContext context, String groupId) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('削除確認'),
+        content: const Text('このクラス枠を削除しますか？\n（過去のレッスンデータは残ります）'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('キャンセル'),
+          ),
+          TextButton(
+            onPressed: () async {
+              await FirebaseFirestore.instance.collection('classGroups').doc(groupId).delete();
+              if (context.mounted) Navigator.pop(context);
+            },
+            child: const Text('削除', style: TextStyle(color: Colors.red)),
+          ),
+        ],
       ),
     );
   }

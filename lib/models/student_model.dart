@@ -37,9 +37,12 @@ class Student {
   final DateTime admissionDate;
   
   final List<Enrollment> enrollments; 
-  
-  // ★追加: 検索用のクラスIDリスト (Firestoreの array-contains クエリ用)
   final List<String> enrolledGroupIds; 
+  
+  final int ticketBalance; 
+  
+  // ★追加: 年会費の発生月 ('1月'...'12月', '年会費なし')
+  final String annualFeeMonth;
 
   Student({
     required this.id,
@@ -51,14 +54,15 @@ class Student {
     required this.dob,
     required this.admissionDate,
     required this.enrollments,
-    required this.enrolledGroupIds, // ★追加
+    required this.enrolledGroupIds,
+    this.ticketBalance = 0,
+    this.annualFeeMonth = '年会費なし', // ★追加: デフォルト
   });
 
   factory Student.fromMap(Map<String, dynamic> data, String id) {
     var list = data['enrollments'] as List<dynamic>? ?? [];
     List<Enrollment> enrollmentsList = list.map((i) => Enrollment.fromMap(i)).toList();
     
-    // ★追加: 検索用IDリストの読み込み（なければenrollmentsから生成）
     var groupIds = List<String>.from(data['enrolledGroupIds'] ?? []);
     if (groupIds.isEmpty && enrollmentsList.isNotEmpty) {
       groupIds = enrollmentsList.map((e) => e.groupId).toList();
@@ -74,7 +78,9 @@ class Student {
       dob: (data['dob'] as Timestamp?)?.toDate() ?? DateTime(2000, 1, 1),
       admissionDate: (data['admissionDate'] as Timestamp?)?.toDate() ?? DateTime.now(),
       enrollments: enrollmentsList,
-      enrolledGroupIds: groupIds, // ★追加
+      enrolledGroupIds: groupIds,
+      ticketBalance: data['ticketBalance'] ?? 0,
+      annualFeeMonth: data['annualFeeMonth'] ?? '年会費なし', // ★追加: 読み込み
     );
   }
 
@@ -88,8 +94,9 @@ class Student {
       'dob': dob,
       'admissionDate': admissionDate,
       'enrollments': enrollments.map((e) => e.toMap()).toList(),
-      // ★追加: 検索用IDリストを保存
       'enrolledGroupIds': enrollments.map((e) => e.groupId).toList(),
+      'ticketBalance': ticketBalance,
+      'annualFeeMonth': annualFeeMonth, // ★追加: 保存
     };
   }
   

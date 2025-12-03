@@ -4,14 +4,19 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 
-import 'package:atoz_school_app/models/lesson_model.dart';
-import 'package:atoz_school_app/models/student_model.dart';
-import 'package:atoz_school_app/models/ticket_model.dart';
+import '../../models/lesson_model.dart';
+import '../../models/student_model.dart';
+import '../../models/ticket_model.dart';
+import '../../models/class_model.dart';
+import '../../models/lesson_transaction_model.dart';
+
 import 'student_link_screen.dart';
 import 'ticket_list_screen.dart';
 import 'reservation_confirm_screen.dart';
 import 'transfer_lesson_selector_screen.dart';
 import 'transfer_history_screen.dart';
+import 'guardian_booking_screen.dart';
+import 'guardian_transaction_history_screen.dart'; 
 
 class GuardianHomeScreen extends StatefulWidget {
   const GuardianHomeScreen({super.key});
@@ -27,11 +32,13 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
   
   List<Student> _myChildren = [];
   bool _isLoadingChildren = true;
+  bool _isLoadingMaster = true; 
 
   Map<String, String> _courseNames = {}; 
   Map<String, String> _levelNames = {};  
   Map<String, String> _levelToCourse = {}; 
   Map<String, String> _groupToLevel = {}; 
+  Map<String, ClassGroup> _classGroupMap = {}; 
 
   @override
   void initState() {
@@ -44,24 +51,39 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
   Future<void> _fetchMasterData() async {
     try {
       final firestore = FirebaseFirestore.instance;
+      
       final coursesSnap = await firestore.collection('courses').get();
       for (var doc in coursesSnap.docs) {
         _courseNames[doc.id] = doc.data()['name'] ?? '';
       }
+      
       final levelsSnap = await firestore.collection('levels').get();
       for (var doc in levelsSnap.docs) {
         final data = doc.data();
         _levelNames[doc.id] = data['name'] ?? '';
         _levelToCourse[doc.id] = data['courseId'] ?? '';
       }
+      
+      final allGroupDocs = <QueryDocumentSnapshot>[];
+      final classGroupsSnap = await firestore.collection('classGroups').get();
+      allGroupDocs.addAll(classGroupsSnap.docs);
       final groupsSnap = await firestore.collection('groups').get();
-      for (var doc in groupsSnap.docs) {
-        final data = doc.data();
+      allGroupDocs.addAll(groupsSnap.docs);
+      
+      for (var doc in allGroupDocs) {
+        final data = doc.data() as Map<String, dynamic>;
         _groupToLevel[doc.id] = data['levelId'] ?? '';
+        _classGroupMap[doc.id] = ClassGroup.fromMap(data, doc.id);
       }
-      if (mounted) setState(() {});
+      
+      if (mounted) {
+        setState(() {
+          _isLoadingMaster = false;
+        });
+      }
     } catch (e) {
       print('Error fetching master data: $e');
+      if (mounted) setState(() => _isLoadingMaster = false);
     }
   }
 
@@ -82,7 +104,7 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
     
     if (mounted) {
       setState(() {
-        _myChildren = snapshot.docs.map((doc) => Student.fromMap(doc.data(), doc.id)).toList();
+        _myChildren = snapshot.docs.map((doc) => Student.fromMap(doc.data() as Map<String, dynamic>, doc.id)).toList();
         _isLoadingChildren = false;
       });
     }
@@ -90,7 +112,10 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoadingChildren) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    if (_isLoadingChildren || _isLoadingMaster) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    
     if (_myChildren.isEmpty) return _buildNoChildrenView();
 
     final studentIds = _myChildren.map((s) => s.id).toList();
@@ -133,6 +158,29 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
     );
   }
 
+  // ★ここに追加しました
+  Widget _buildNoChildrenView() {
+    return Scaffold(
+      appBar: AppBar(title: const Text('ホーム')),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text('生徒情報が登録されていません'),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: () async {
+                await Navigator.push(context, MaterialPageRoute(builder: (_) => const StudentLinkScreen()));
+                _fetchMyChildren();
+              },
+              child: const Text('生徒IDを入力して紐付ける'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Map<String, List<_CalendarItem>> _generateCalendarItems(
     List<QueryDocumentSnapshot> lessonDocs,
     List<QueryDocumentSnapshot> resDocs,
@@ -141,17 +189,13 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
     final Map<String, List<_CalendarItem>> itemsByDay = {};
     final DateFormat formatter = DateFormat('yyyy-MM-dd');
 
-    // 全レッスン情報のマップ (ID検索用)
     final Map<String, LessonInstance> allLessonsMap = {
       for (var doc in lessonDocs) 
         doc.id: LessonInstance.fromMap(doc.data() as Map<String, dynamic>, doc.id)
     };
 
-    // 予約データ
     final Map<String, QueryDocumentSnapshot> resMap = {};
     final Map<String, QueryDocumentSnapshot> transferSourceMap = {};
-    
-    // 予約ID -> 予約データ (チケット経由での参照用)
     final Map<String, Map<String, dynamic>> allResByIdMap = {
       for (var doc in resDocs)
         doc.id: doc.data() as Map<String, dynamic>
@@ -161,14 +205,12 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
       final data = doc.data() as Map<String, dynamic>;
       final key = '${data['lessonInstanceId']}_${data['studentId']}';
       resMap[key] = doc;
-
       if (data['originalLessonId'] != null) {
         final sourceKey = '${data['originalLessonId']}_${data['studentId']}';
         transferSourceMap[sourceKey] = doc;
       }
     }
 
-    // チケットデータ
     final Map<String, QueryDocumentSnapshot> ticketMap = {};
     for (var doc in ticketDocs) {
       final data = doc.data() as Map<String, dynamic>;
@@ -178,24 +220,22 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
       }
     }
 
-    // レッスンスキャン
     for (var doc in lessonDocs) {
       final lesson = LessonInstance.fromMap(doc.data() as Map<String, dynamic>, doc.id);
       final dateString = formatter.format(lesson.startTime);
+      final classGroup = _classGroupMap[lesson.classGroupId]; 
 
       for (var student in _myChildren) {
         bool shouldShow = false;
         String status = 'none';
         String? reservationId;
         Ticket? internalTicket;
-        
-        // ★追加: 振替関係の情報
-        LessonInstance? destinationLesson; // 振替先
-        LessonInstance? sourceLesson;      // 振替元
+        LessonInstance? destinationLesson;
+        LessonInstance? sourceLesson;
 
         final uniqueKey = '${lesson.id}_${student.id}';
 
-        // A. 所属クラスチェック
+        // 所属チェック
         bool isEnrolled = false;
         for (var enrollment in student.enrollments) {
           if (enrollment.groupId == lesson.classGroupId) {
@@ -207,19 +247,21 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
               final endDate = DateTime(enrollment.endDate!.year, enrollment.endDate!.month, enrollment.endDate!.day);
               if (lessonDate.isAfter(endDate)) isBeforeEnd = false;
             }
-            if (isAfterStart && isBeforeEnd) {
-              isEnrolled = true;
-            }
+            if (isAfterStart && isBeforeEnd) isEnrolled = true;
           }
         }
 
         if (isEnrolled) {
-          shouldShow = true;
-          status = 'enrolled'; 
+          if (classGroup != null && classGroup.bookingType == 'flexible') {
+             shouldShow = true;
+             status = 'flexible_not_booked'; 
+          } else {
+             shouldShow = true;
+             status = 'enrolled'; 
+          }
 
           if (transferSourceMap.containsKey(uniqueKey)) {
             status = 'ticket_used'; 
-            // ★追加: 直接振替の場合の振替先情報を取得
             final resDoc = transferSourceMap[uniqueKey]!;
             final resData = resDoc.data() as Map<String, dynamic>;
             final destId = resData['lessonInstanceId'];
@@ -235,7 +277,6 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
               status = 'absent_no_transfer'; 
             } else if (isUsed) {
               status = 'ticket_used'; 
-              // ★追加: チケット経由で振替先情報を取得
               final usedResId = tData['usedForReservationId'];
               if (usedResId != null && allResByIdMap.containsKey(usedResId)) {
                 final resData = allResByIdMap[usedResId]!;
@@ -248,14 +289,12 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
           }
         }
 
-        // B. 予約チェック
         if (resMap.containsKey(uniqueKey)) {
           shouldShow = true;
           final rData = resMap[uniqueKey]!.data() as Map<String, dynamic>;
           status = rData['status'] == 'approved' ? 'booked' : 'pending';
           reservationId = resMap[uniqueKey]!.id;
           
-          // ★追加: 振替元情報を取得
           if (rData['originalLessonId'] != null) {
             final orgId = rData['originalLessonId'];
             sourceLesson = allLessonsMap[orgId];
@@ -269,8 +308,9 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
             status: status,
             reservationId: reservationId,
             internalTicket: internalTicket,
-            destinationLesson: destinationLesson, // 追加
-            sourceLesson: sourceLesson,           // 追加
+            destinationLesson: destinationLesson,
+            sourceLesson: sourceLesson,
+            classGroup: classGroup,
           );
           if (itemsByDay[dateString] == null) itemsByDay[dateString] = [];
           itemsByDay[dateString]!.add(item);
@@ -282,12 +322,34 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
 
   Widget _buildMainScreen(Map<String, List<_CalendarItem>> itemsByDay) {
     final events = itemsByDay[DateFormat('yyyy-MM-dd').format(_selectedDay ?? _focusedDay)] ?? [];
+    
+    List<ClassGroup> flexibleClasses = [];
+    for (var child in _myChildren) {
+      for (var enrollment in child.enrollments) {
+        final group = _classGroupMap[enrollment.groupId];
+        if (group != null && group.bookingType == 'flexible') {
+          if (!flexibleClasses.any((g) => g.id == group.id)) {
+            flexibleClasses.add(group);
+          }
+        }
+      }
+    }
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('ホーム'),
         backgroundColor: Colors.blue.shade700,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.receipt_long),
+            tooltip: 'チケット履歴',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const GuardianTransactionHistoryScreen()),
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.history),
             tooltip: '振替履歴',
@@ -318,6 +380,7 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
               eventLoader: (day) {
                 final allEvents = itemsByDay[DateFormat('yyyy-MM-dd').format(day)] ?? [];
                 return allEvents.where((item) {
+                  if (item.status == 'flexible_not_booked') return false;
                   return item.status != 'ticket_used' && item.status != 'absent_no_transfer';
                 }).toList();
               },
@@ -333,44 +396,62 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
               onPageChanged: (focusedDay) => _focusedDay = focusedDay,
               calendarStyle: CalendarStyle(
                 selectedDecoration: const BoxDecoration(color: Colors.blue, shape: BoxShape.circle),
+                todayDecoration: BoxDecoration(color: Colors.blue.withOpacity(0.5), shape: BoxShape.circle),
                 markerDecoration: BoxDecoration(color: Colors.red.shade600, shape: BoxShape.circle),
               ),
               headerStyle: const HeaderStyle(formatButtonVisible: false, titleCentered: true),
             ),
             const Divider(height: 1),
+            
+            if (flexibleClasses.isNotEmpty) ...[
+               Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                child: Row(
+                  children: const [
+                    Icon(Icons.airplane_ticket, color: Colors.orange),
+                    SizedBox(width: 8),
+                    Text("チケット予約", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  ],
+                ),
+              ),
+              ...flexibleClasses.map((group) {
+                  final student = _myChildren.firstWhere((s) => s.enrollments.any((e) => e.groupId == group.id));
+                  return Card(
+                    color: Colors.orange[50],
+                    margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    child: ListTile(
+                      title: Text('${student.firstName}さん: ${_getCourseAndLevelName(group.levelId)}'),
+                      subtitle: const Text('受講するには予約が必要です'),
+                      trailing: ElevatedButton(
+                        child: const Text('予約する'),
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.orange, foregroundColor: Colors.white),
+                        onPressed: () {
+                          Navigator.push(
+                            context, 
+                            MaterialPageRoute(builder: (_) => GuardianBookingScreen(
+                              student: student, 
+                              enrolledClass: group
+                            ))
+                          );
+                        },
+                      ),
+                    ),
+                  );
+              }),
+              const Divider(),
+            ],
+
             const Padding(
               padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: Text("予定リスト", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              child: Text("選択日の予定", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
             ),
-            if (events.isEmpty)
+            if (events.where((e) => e.status != 'flexible_not_booked').isEmpty)
               const Padding(
                 padding: EdgeInsets.all(16.0),
                 child: Text("この日の予定はありません。", style: TextStyle(color: Colors.black54)),
               ),
-            ...events.map((item) => _buildLessonTile(item)).toList(),
+            ...events.where((e) => e.status != 'flexible_not_booked').map((item) => _buildLessonTile(item)).toList(),
             const SizedBox(height: 40),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildNoChildrenView() {
-    return Scaffold(
-      appBar: AppBar(title: const Text('ホーム')),
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Text('生徒情報が登録されていません'),
-            const SizedBox(height: 20),
-            ElevatedButton(
-              onPressed: () async {
-                await Navigator.push(context, MaterialPageRoute(builder: (_) => const StudentLinkScreen()));
-                _fetchMyChildren();
-              },
-              child: const Text('生徒IDを入力して紐付ける'),
-            ),
           ],
         ),
       ),
@@ -393,9 +474,14 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
         cardColor = Colors.blue.shade50;
         break;
       case 'booked':
-        statusText = '振替レッスン';
-        statusColor = Colors.red;
-        cardColor = Colors.red.shade50;
+        statusText = '予約済'; 
+        statusColor = Colors.indigo;
+        cardColor = Colors.indigo.shade50;
+        if (item.sourceLesson != null) {
+          statusText = '振替レッスン';
+          statusColor = Colors.red;
+          cardColor = Colors.red.shade50;
+        }
         break;
       case 'pending':
         statusText = '申請中';
@@ -432,7 +518,6 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
           style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, 
             color: (item.status.contains('ticket') || item.status.contains('absent')) ? Colors.grey.shade700 : Colors.black)),
         
-        // ★修正: サブタイトルをカスタマイズして詳細情報を表示
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -441,7 +526,6 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
               style: const TextStyle(fontSize: 13)
             ),
             
-            // 1. 振替先 (ticket_used の場合)
             if (item.status == 'ticket_used' && item.destinationLesson != null) ...[
               const SizedBox(height: 4),
               Row(
@@ -459,7 +543,6 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
               ),
             ],
 
-            // 2. 振替元 (booked の場合)
             if (item.status == 'booked' && item.sourceLesson != null) ...[
               const SizedBox(height: 4),
               Row(
@@ -484,7 +567,14 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
           backgroundColor: statusColor,
         ),
         onTap: () {
-          if (item.status == 'ticket_pending') {
+          final bookingType = (item.classGroup?.bookingType ?? '').trim();
+          bool isFlexible = bookingType == 'flexible';
+          bool isBooked = item.status == 'booked';
+          bool isNotTransfer = item.sourceLesson == null;
+
+          if (isFlexible && isBooked && isNotTransfer) {
+              _cancelFlexibleBooking(item.reservationId!);
+          } else if (item.status == 'ticket_pending') {
              _goToTransferSelection(item);
           } else {
              _showLessonActionMenu(item);
@@ -494,10 +584,76 @@ class _GuardianHomeScreenState extends State<GuardianHomeScreen> {
     );
   }
 
-  // (以降のメソッド _goToTransferSelection, _showLessonActionMenu, 
-  //  _registerAbsence, _undoAbsence, _changeToForfeited, 
-  //  _reviveToPending, _cancelReservationToPending, _cancelReservationToForfeited,
-  //  _cancelAllAndReturn は変更ありませんが、ファイル全体を貼るため以下に含めます)
+  Future<void> _cancelFlexibleBooking(String reservationId) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('予約キャンセル'),
+        content: const Text('予約をキャンセルし、チケットを1枚戻しますか？'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('いいえ')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('はい')),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    try {
+      await FirebaseFirestore.instance.runTransaction((transaction) async {
+         final resRef = FirebaseFirestore.instance.collection('reservations').doc(reservationId);
+         final resSnap = await transaction.get(resRef);
+         if (!resSnap.exists) return;
+         
+         final lessonId = resSnap.data()!['lessonInstanceId'] as String;
+         final studentId = resSnap.data()!['studentId'] as String;
+
+         transaction.update(resRef, {'status': 'cancelled'});
+
+         final lessonRef = FirebaseFirestore.instance.collection('lessonInstances').doc(lessonId);
+         transaction.update(lessonRef, {'currentBookings': FieldValue.increment(-1)});
+
+         final stockQuery = await FirebaseFirestore.instance
+             .collection('ticket_stocks')
+             .where('studentId', isEqualTo: studentId)
+             .where('status', isEqualTo: 'active')
+             .get();
+         
+         if (stockQuery.docs.isNotEmpty) {
+           final docs = stockQuery.docs;
+           docs.sort((a, b) {
+             final d1 = (a['expiryDate'] as Timestamp).toDate();
+             final d2 = (b['expiryDate'] as Timestamp).toDate();
+             return d2.compareTo(d1); 
+           });
+           final targetStock = docs.first;
+           transaction.update(targetStock.reference, {
+             'remainingAmount': FieldValue.increment(1),
+           });
+         }
+
+         final studentRef = FirebaseFirestore.instance.collection('students').doc(studentId);
+         transaction.update(studentRef, {
+           'ticketBalance': FieldValue.increment(1),
+         });
+
+         final historyRef = FirebaseFirestore.instance.collection('lessonTransactions').doc();
+         final history = LessonTransaction(
+           id: historyRef.id,
+           studentId: studentId,
+           amount: 1, 
+           type: 'cancel_refund',
+           createdAt: DateTime.now(),
+           adminId: null, 
+           note: '予約キャンセル返還',
+         );
+         transaction.set(historyRef, history.toMap());
+      });
+      
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('キャンセルしました')));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('エラー: $e')));
+    }
+  }
 
   void _goToTransferSelection(_CalendarItem item) {
     String levelId = item.lesson.levelId; 
@@ -1031,6 +1187,7 @@ class _CalendarItem {
   final Ticket? internalTicket;
   final LessonInstance? destinationLesson;
   final LessonInstance? sourceLesson;
+  final ClassGroup? classGroup; 
   
   _CalendarItem({
     required this.lesson, 
@@ -1040,5 +1197,6 @@ class _CalendarItem {
     this.internalTicket,
     this.destinationLesson,
     this.sourceLesson,
+    this.classGroup,
   });
 }

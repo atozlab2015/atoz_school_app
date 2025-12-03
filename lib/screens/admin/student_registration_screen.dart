@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
-// 相対パスでインポート
 import '../../models/student_model.dart';
+import '../../models/class_model.dart';
 
 class StudentRegistrationScreen extends StatefulWidget {
   const StudentRegistrationScreen({super.key});
@@ -22,6 +22,14 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
   DateTime _dob = DateTime(2018, 4, 2); 
   DateTime _admissionDate = DateTime.now(); 
   
+  // ★追加: 年会費の月
+  String _annualFeeMonth = '年会費なし';
+  final List<String> _annualFeeOptions = [
+    '年会費なし', 
+    '1月', '2月', '3月', '4月', '5月', '6月', 
+    '7月', '8月', '9月', '10月', '11月', '12月'
+  ];
+  
   List<Enrollment> _tempEnrollments = [];
   
   Map<String, String> _courseNames = {};
@@ -39,19 +47,41 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
 
   Future<void> _fetchAllMasterData() async {
     final firestore = FirebaseFirestore.instance;
+    
     final coursesSnap = await firestore.collection('courses').get();
     for (var doc in coursesSnap.docs) _courseNames[doc.id] = doc.data()['name'] ?? '';
+    
     final levelsSnap = await firestore.collection('levels').get();
     for (var doc in levelsSnap.docs) _levelNames[doc.id] = doc.data()['name'] ?? '';
-    final groupsSnap = await firestore.collection('groups').get();
+    
+    final classGroupsSnap = await firestore.collection('classGroups').get();
+
     final List<Map<String, dynamic>> options = [];
-    for (var doc in groupsSnap.docs) {
+    final Map<String, bool> addedFlexibleLevels = {}; 
+    
+    const dayMap = {'1': '月', '2': '火', '3': '水', '4': '木', '5': '金', '6': '土', '7': '日'};
+
+    for (var doc in classGroupsSnap.docs) {
       final data = doc.data();
-      final courseName = _courseNames[data['courseId']] ?? '不明';
-      final levelName = _levelNames[data['levelId']] ?? '不明';
-      final label = '$courseName / $levelName / ${data['dayOfWeek']} ${data['startTime']} (${data['teacherName']})';
-      options.add({'id': doc.id, 'label': label});
+      final group = ClassGroup.fromMap(data, doc.id);
+      
+      final courseName = _courseNames[group.courseId] ?? '不明';
+      final levelName = _levelNames[group.levelId] ?? (group.levelId.isNotEmpty ? group.levelId : '不明');
+      
+      if (group.bookingType == 'flexible') {
+        if (!addedFlexibleLevels.containsKey(group.levelId)) {
+          final label = '【予約制】 $courseName / $levelName (曜日自由)';
+          options.add({'id': group.id, 'label': label}); 
+          addedFlexibleLevels[group.levelId] = true;
+        }
+      } else {
+        String dayStr = group.dayOfWeek.toString();
+        if (dayMap.containsKey(dayStr)) dayStr = dayMap[dayStr]!;
+        final label = '$courseName / $levelName / $dayStr ${group.startTime} (${group.teacherName})';
+        options.add({'id': group.id, 'label': label});
+      }
     }
+    
     if (mounted) setState(() => _classGroupOptions = options);
   }
 
@@ -187,8 +217,9 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
         dob: _dob,
         admissionDate: _admissionDate,
         enrollments: _tempEnrollments, 
-        // ★追加: モデルのコンストラクタが変わったため
         enrolledGroupIds: _tempEnrollments.map((e) => e.groupId).toList(), 
+        ticketBalance: 0,
+        annualFeeMonth: _annualFeeMonth, // ★追加: 保存
       );
 
       await newDocRef.set(newStudent.toMap());
@@ -201,6 +232,7 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
         _firstName = '';
         _lastNameRomaji = '';
         _firstNameRomaji = '';
+        _annualFeeMonth = '年会費なし'; // リセット
         _tempEnrollments = []; 
       });
 
@@ -271,6 +303,24 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
                     onTap: () => _selectDate(false)
                   ),
 
+                  const SizedBox(height: 16),
+                  // ★追加: 年会費プルダウン
+                  DropdownButtonFormField<String>(
+                    value: _annualFeeMonth,
+                    decoration: const InputDecoration(labelText: '年会費の発生月', border: OutlineInputBorder()),
+                    items: _annualFeeOptions.map((String value) {
+                      return DropdownMenuItem<String>(
+                        value: value,
+                        child: Text(value),
+                      );
+                    }).toList(),
+                    onChanged: (val) {
+                      setState(() {
+                        _annualFeeMonth = val!;
+                      });
+                    },
+                  ),
+
                   const Divider(height: 40),
 
                   Row(
@@ -292,10 +342,11 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
                   ..._tempEnrollments.asMap().entries.map((entry) {
                     final index = entry.key;
                     final enrollment = entry.value;
-                    final label = _classGroupOptions.firstWhere(
+                    final groupOption = _classGroupOptions.firstWhere(
                       (opt) => opt['id'] == enrollment.groupId, 
-                      orElse: () => {'label': '不明なクラス'}
-                    )['label'];
+                      orElse: () => {'label': '不明なクラス (ID: ${enrollment.groupId})'}
+                    );
+                    final label = groupOption['label'];
                     final dateStr = DateFormat('yyyy/MM/dd').format(enrollment.startDate);
 
                     return Card(
@@ -313,7 +364,7 @@ class _StudentRegistrationScreenState extends State<StudentRegistrationScreen> {
                         ),
                       ),
                     );
-                  }),
+                  }).toList(),
                   
                   const SizedBox(height: 40),
                   SizedBox(width: double.infinity, height: 50, child: ElevatedButton(onPressed: _registerStudent, child: const Text('登録する'))),

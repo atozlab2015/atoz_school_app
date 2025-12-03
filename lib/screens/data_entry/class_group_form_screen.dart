@@ -1,180 +1,250 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:atoz_school_app/models/class_model.dart';
-
-// 予約タイプの選択肢
-const List<String> bookingTypes = ['fixed', 'spot'];
-// 曜日選択肢
-const List<String> daysOfWeek = ['月曜', '火曜', '水曜', '木曜', '金曜', '土曜', '日曜'];
+import 'package:intl/intl.dart';
+import '../../models/class_model.dart'; // モデルのパスが合っているか確認してください
 
 class ClassGroupFormScreen extends StatefulWidget {
-  // ▼ 階層の全IDを受け取る
-  final String subjectId; 
-  final String courseId; 
-  final String levelId;
-  final String levelName;
+  final ClassGroup? classGroup; // 編集時はこれが入る
+  
+  // ★新規作成用に親IDを受け取れるように追加
+  final String? subjectId;
+  final String? courseId;
+  final String? levelId;
 
   const ClassGroupFormScreen({
-    super.key,
-    required this.subjectId, 
-    required this.courseId, 
-    required this.levelId,
-    required this.levelName,
-  });
+    Key? key, 
+    this.classGroup,
+    this.subjectId,
+    this.courseId,
+    this.levelId,
+  }) : super(key: key);
 
   @override
-  State<ClassGroupFormScreen> createState() => _ClassGroupFormScreenState();
+  _ClassGroupFormScreenState createState() => _ClassGroupFormScreenState();
 }
 
 class _ClassGroupFormScreenState extends State<ClassGroupFormScreen> {
-  final GlobalKey<FormState> _formKey = GlobalKey<FormState>(); 
-  
-  // フォームの状態を保存する変数
+  final _formKey = GlobalKey<FormState>();
+
+  // 入力用変数
   String _teacherName = '';
-  String _dayOfWeek = daysOfWeek.first; 
-  String _startTime = '10:00'; 
-  int _duration = 50; 
-  int _capacity = 8;
-  String _bookingType = bookingTypes.first; 
-  int? _monthlyLimit; // 月の回数制限
+  int _dayOfWeek = 1; // 1=月曜日
+  TimeOfDay _startTime = const TimeOfDay(hour: 10, minute: 0);
+  TimeOfDay _endTime = const TimeOfDay(hour: 10, minute: 50);
+  int _capacity = 4;
+  
+  // ★重要: 予約タイプ (fixed=固定制, flexible=予約制)
+  String _bookingType = 'fixed'; 
 
-  // ■ データ保存処理
-  Future<void> _saveGroup() async {
-    final form = _formKey.currentState;
-    if (form == null || !form.validate()) return;
-    form.save();
+  bool _isLoading = false;
 
-    // 最終モデルへのデータ渡す (全IDとフォーム入力を結合)
-    final newGroup = ClassGroup(
-      id: FirebaseFirestore.instance.collection('groups').doc().id,
-      // ▼▼▼ ここで全階層IDを保存 ▼▼▼
-      subjectId: widget.subjectId, 
-      courseId: widget.courseId, 
-      levelId: widget.levelId,
-      // ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-      teacherName: _teacherName,
-      dayOfWeek: _dayOfWeek,
-      startTime: _startTime,
-      durationMinutes: _duration,
-      capacity: _capacity,
-      bookingType: _bookingType,
-      spotLimitType: _bookingType == 'spot' && _monthlyLimit != null ? 'monthly_count' : 'unlimited',
-      monthlyLimitCount: _monthlyLimit ?? 0,
-    );
+  @override
+  void initState() {
+    super.initState();
+    if (widget.classGroup != null) {
+      // 編集モード: 既存データから読み込み
+      final c = widget.classGroup!;
+      _teacherName = c.teacherName;
+      
+      // dayOfWeekがStringで保存されているかintかによる変換（モデルに合わせて調整）
+      // ここでは汎用的に int.tryParse で対応
+      _dayOfWeek = int.tryParse(c.dayOfWeek) ?? 1; 
+      
+      _capacity = c.capacity;
+      _bookingType = c.bookingType; // ★読み込み
+
+      // 時間のパース (HH:mm -> TimeOfDay)
+      final startParts = c.startTime.split(':');
+      if (startParts.length == 2) {
+        _startTime = TimeOfDay(hour: int.parse(startParts[0]), minute: int.parse(startParts[1]));
+        
+        // 終了時間は durationMinutes から計算する
+        final startDt = DateTime(2020, 1, 1, _startTime.hour, _startTime.minute);
+        final endDt = startDt.add(Duration(minutes: c.durationMinutes));
+        _endTime = TimeOfDay(hour: endDt.hour, minute: endDt.minute);
+      }
+    }
+  }
+
+  Future<void> _saveClassGroup() async {
+    if (!_formKey.currentState!.validate()) return;
+    setState(() => _isLoading = true);
 
     try {
-      // ClassGroupモデルをMapに変換してFirestoreに保存
-      await FirebaseFirestore.instance.collection('groups').add(newGroup.toMap());
+      final docRef = widget.classGroup == null
+          ? FirebaseFirestore.instance.collection('classGroups').doc()
+          : FirebaseFirestore.instance.collection('classGroups').doc(widget.classGroup!.id);
+
+      final startTimeStr = '${_startTime.hour.toString().padLeft(2, '0')}:${_startTime.minute.toString().padLeft(2, '0')}';
       
-      if (mounted) {
-        Navigator.pop(context); // 前の画面に戻る
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('クラス枠が正常に登録されました。')),
-        );
+      // 終了時間を計算してDuration(分数)を出す
+      final startDt = DateTime(2020, 1, 1, _startTime.hour, _startTime.minute);
+      final endDt = DateTime(2020, 1, 1, _endTime.hour, _endTime.minute);
+      // 日またぎの計算（終了が開始より前なら翌日扱い）
+      DateTime adjustedEndDt = endDt;
+      if (endDt.isBefore(startDt)) {
+        adjustedEndDt = endDt.add(const Duration(days: 1));
       }
+      final duration = adjustedEndDt.difference(startDt).inMinutes;
+
+      final newGroup = ClassGroup(
+        id: docRef.id,
+        // ★修正: 編集時は既存ID、新規時は渡されたIDを使う（nullチェック付き）
+        subjectId: widget.classGroup?.subjectId ?? widget.subjectId ?? '',
+        courseId: widget.classGroup?.courseId ?? widget.courseId ?? '',
+        levelId: widget.classGroup?.levelId ?? widget.levelId ?? '',
+        
+        teacherName: _teacherName,
+        dayOfWeek: _dayOfWeek.toString(), // モデルに合わせてString変換
+        startTime: startTimeStr,
+        durationMinutes: duration,
+        capacity: _capacity,
+        
+        // ★重要: ここでタイプを保存
+        bookingType: _bookingType, 
+        
+        // その他デフォルト値（フォームにない項目）
+        spotLimitType: widget.classGroup?.spotLimitType ?? 'unlimited',
+        monthlyLimitCount: widget.classGroup?.monthlyLimitCount ?? 0,
+        validFrom: widget.classGroup?.validFrom,
+        validTo: widget.classGroup?.validTo,
+      );
+
+      await docRef.set(newGroup.toMap());
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('クラス枠を保存しました')));
+      Navigator.pop(context);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('登録中にエラーが発生しました: $e')),
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('エラー: $e')));
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  // 時間選択ピッカー
+  Future<void> _pickTime(bool isStart) async {
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: isStart ? _startTime : _endTime,
+    );
+    if (picked != null) {
+      setState(() {
+        if (isStart) {
+          _startTime = picked;
+          // 開始時間が変わったら、終了時間を自動で50分後にする（便利機能）
+          final startDt = DateTime(2020, 1, 1, _startTime.hour, _startTime.minute);
+          final endDt = startDt.add(const Duration(minutes: 50));
+          _endTime = TimeOfDay(hour: endDt.hour, minute: endDt.minute);
+        } else {
+          _endTime = picked;
+        }
+      });
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text('${widget.levelName}：枠の新規登録'),
-        backgroundColor: Colors.brown.shade400,
-        actions: [
-          IconButton(onPressed: _saveGroup, icon: const Icon(Icons.save, color: Colors.white)),
-        ],
-      ),
+      appBar: AppBar(title: Text(widget.classGroup == null ? 'クラス枠の新規作成' : 'クラス枠の編集')),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16.0),
         child: Form(
           key: _formKey,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              // フォームタイトル
-              Text('対象: ${widget.levelName}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-              const Divider(),
-              
-              // 1. 講師名
+            children: [
+              // 講師名
               TextFormField(
+                initialValue: _teacherName,
                 decoration: const InputDecoration(labelText: '担当講師名'),
-                onSaved: (value) => _teacherName = value ?? '',
-                validator: (value) => (value == null || value.isEmpty) ? '講師名は必須です' : null,
+                onChanged: (val) => _teacherName = val,
+                validator: (val) => val == null || val.isEmpty ? '講師名は必須です' : null,
               ),
-              // 2. 曜日選択
-              DropdownButtonFormField<String>(
-                decoration: const InputDecoration(labelText: '曜日'),
+              const SizedBox(height: 16),
+              
+              // 曜日選択
+              DropdownButtonFormField<int>(
                 value: _dayOfWeek,
-                items: daysOfWeek.map((String day) {
-                  return DropdownMenuItem(value: day, child: Text(day));
-                }).toList(),
-                onChanged: (newValue) => setState(() => _dayOfWeek = newValue!),
-                onSaved: (value) => _dayOfWeek = value!,
+                decoration: const InputDecoration(labelText: '曜日'),
+                items: const [
+                  DropdownMenuItem(value: 1, child: Text('月曜日')),
+                  DropdownMenuItem(value: 2, child: Text('火曜日')),
+                  DropdownMenuItem(value: 3, child: Text('水曜日')),
+                  DropdownMenuItem(value: 4, child: Text('木曜日')),
+                  DropdownMenuItem(value: 5, child: Text('金曜日')),
+                  DropdownMenuItem(value: 6, child: Text('土曜日')),
+                  DropdownMenuItem(value: 7, child: Text('日曜日')),
+                ],
+                onChanged: (val) => setState(() => _dayOfWeek = val!),
               ),
-              // 3. 時間とレッスン時間
+              const SizedBox(height: 16),
+
+              // 時間選択
               Row(
                 children: [
                   Expanded(
-                    child: TextFormField(
-                      decoration: const InputDecoration(labelText: '開始時間 (HH:MM)'),
-                      initialValue: _startTime,
-                      onSaved: (value) => _startTime = value ?? '',
-                      validator: (value) => value!.isEmpty ? '時間を入力' : null,
+                    child: ListTile(
+                      title: const Text('開始'),
+                      subtitle: Text(_startTime.format(context), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                      onTap: () => _pickTime(true),
                     ),
                   ),
-                  const SizedBox(width: 16),
+                  const Icon(Icons.arrow_forward),
                   Expanded(
-                    child: TextFormField(
-                      decoration: const InputDecoration(labelText: 'レッスン時間 (分)'),
-                      initialValue: _duration.toString(),
-                      keyboardType: TextInputType.number,
-                      onSaved: (value) => _duration = int.tryParse(value ?? '0') ?? 50,
-                      validator: (value) => value!.isEmpty ? '時間を入力' : null,
+                    child: ListTile(
+                      title: const Text('終了'),
+                      subtitle: Text(_endTime.format(context), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                      onTap: () => _pickTime(false),
                     ),
                   ),
                 ],
               ),
-              // 4. 定員設定
-              TextFormField(
-                decoration: const InputDecoration(labelText: '定員数（振替含む）'),
-                initialValue: _capacity.toString(),
-                keyboardType: TextInputType.number,
-                onSaved: (value) => _capacity = int.tryParse(value ?? '0') ?? 8,
-                validator: (value) => (value == null || int.tryParse(value) == 0) ? '定員は必須です' : null,
-              ),
-              const Divider(height: 30),
-              // 5. 予約タイプ（固定制 or 都度予約）
-              const Text('予約タイプ:', style: TextStyle(fontWeight: FontWeight.bold)),
-              DropdownButton<String>(
-                value: _bookingType,
-                items: bookingTypes.map((type) => DropdownMenuItem(value: type, child: Text(type == 'fixed' ? '固定制' : '都度予約'))).toList(),
-                onChanged: (newValue) => setState(() => _bookingType = newValue!),
-              ),
               
-              // 6. 回数制限 (都度予約の場合のみ表示)
-              if (_bookingType == 'spot') ...[
-                const SizedBox(height: 10),
-                TextFormField(
-                  decoration: const InputDecoration(labelText: '月間予約回数制限 (例: 4)'),
-                  keyboardType: TextInputType.number,
-                  initialValue: _monthlyLimit?.toString(),
-                  onSaved: (value) => _monthlyLimit = int.tryParse(value ?? ''),
-                  validator: (value) => value!.isNotEmpty && int.tryParse(value) == null ? '数値を入力してください' : null,
-                ),
-              ],
-              const SizedBox(height: 40),
-              Center(
-                child: ElevatedButton(
-                  onPressed: _saveGroup,
-                  style: ElevatedButton.styleFrom(backgroundColor: Colors.brown),
-                  child: const Text('クラス枠を登録', style: TextStyle(color: Colors.white)),
+              const Divider(),
+              // ★追加: 予約タイプの選択
+              const Text('クラスタイプ (重要)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const SizedBox(height: 8),
+              RadioListTile<String>(
+                title: const Text('固定制 (Pattern A)'),
+                subtitle: const Text('毎週決まった生徒が出席します。\n（例：通常の英会話クラス）'),
+                value: 'fixed',
+                groupValue: _bookingType,
+                onChanged: (val) => setState(() => _bookingType = val!),
+                activeColor: Colors.indigo,
+              ),
+              RadioListTile<String>(
+                title: const Text('予約・チケット制 (Pattern B)'),
+                subtitle: const Text('所属生徒が都度予約して出席します。チケットを消費します。\n（例：回数制ヨガ、振替自由クラス）'),
+                value: 'flexible',
+                groupValue: _bookingType,
+                onChanged: (val) => setState(() => _bookingType = val!),
+                activeColor: Colors.orange,
+              ),
+              const Divider(),
+
+              // 定員
+              TextFormField(
+                initialValue: _capacity.toString(),
+                decoration: const InputDecoration(labelText: '定員 (名)'),
+                keyboardType: TextInputType.number,
+                onChanged: (val) => _capacity = int.tryParse(val) ?? 4,
+              ),
+              const SizedBox(height: 30),
+
+              SizedBox(
+                width: double.infinity,
+                height: 50,
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.save),
+                  label: _isLoading 
+                    ? const CircularProgressIndicator(color: Colors.white) 
+                    : const Text('保存する', style: TextStyle(fontSize: 18)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.indigo,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: _isLoading ? null : _saveClassGroup, 
                 ),
               ),
             ],

@@ -1,4 +1,4 @@
-// lib/models/class_model.dart (最終版)
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class Subject {
   final String id;
@@ -28,11 +28,10 @@ class ClassLevel {
 
 class ClassGroup {
   final String id;
-  // ▼ 新しく追加・修正されたフィールド
   final String subjectId; 
   final String courseId; 
   final String levelId; 
-  // ... (他のフィールド) ...
+  
   final String teacherName; 
   final String dayOfWeek;
   final String startTime;
@@ -43,9 +42,12 @@ class ClassGroup {
   final String spotLimitType;
   final int monthlyLimitCount;
 
+  // ★追加: 有効期間
+  final DateTime? validFrom; // 開始日 (nullなら無期限/最初から)
+  final DateTime? validTo;   // 終了日 (nullなら無期限/ずっと続く)
+
   ClassGroup({
     required this.id,
-    // ▼ コンストラクタに必須引数を追加
     required this.subjectId, 
     required this.courseId, 
     required this.levelId,
@@ -57,11 +59,12 @@ class ClassGroup {
     required this.bookingType,
     this.spotLimitType = 'unlimited',
     this.monthlyLimitCount = 0,
+    this.validFrom, // ★追加
+    this.validTo,   // ★追加
   });
 
   Map<String, dynamic> toMap() {
     return {
-      // ▼ toMapにもフィールドを追加
       'subjectId': subjectId, 
       'courseId': courseId, 
       'levelId': levelId,
@@ -73,6 +76,29 @@ class ClassGroup {
       'bookingType': bookingType,
       'spotLimitType': spotLimitType,
       'monthlyLimitCount': monthlyLimitCount,
+      // ★追加
+      'validFrom': validFrom, 
+      'validTo': validTo,
     };
+  }
+
+  // ★追加: 編集時などに便利なので fromMap を作成
+  factory ClassGroup.fromMap(Map<String, dynamic> data, String id) {
+    return ClassGroup(
+      id: id,
+      subjectId: data['subjectId'] ?? '',
+      courseId: data['courseId'] ?? '',
+      levelId: data['levelId'] ?? '',
+      teacherName: data['teacherName'] ?? '',
+      dayOfWeek: data['dayOfWeek'] ?? '',
+      startTime: data['startTime'] ?? '',
+      durationMinutes: data['durationMinutes'] ?? 0,
+      capacity: data['capacity'] ?? 0,
+      bookingType: data['bookingType'] ?? 'fixed',
+      spotLimitType: data['spotLimitType'] ?? 'unlimited',
+      monthlyLimitCount: data['monthlyLimitCount'] ?? 0,
+      validFrom: (data['validFrom'] as Timestamp?)?.toDate(),
+      validTo: (data['validTo'] as Timestamp?)?.toDate(),
+    );
   }
 }
